@@ -25,7 +25,7 @@ if not api_key:
 
 # Get model name from environment
 model_name = os.getenv("MODEL_NAME", "gpt-4")  # Default to gpt-4 if not set
-openai_client = OpenAI(api_key=api_key)
+openai_client = OpenAI(api_key = api_key)
 
 # Import script evaluator
 from script_evaluator import ScriptEvaluator
@@ -177,59 +177,43 @@ class SocialMediaAdEvaluator:
     
     def _extract_brief_sections(self, full_text: str) -> List[Dict[str, str]]:
         """
-        Extract multiple briefs and their corresponding sections from the input text.
+        Extract brief sections from the full text, handling multiple briefs if present.
         
         Args:
-            full_text: The complete input text containing multiple briefs
+            full_text: The complete document text
             
         Returns:
-            List of dictionaries containing sections for each brief
+            List of dictionaries, each containing brief, script, debrief, and references sections
         """
         briefs = []
         
-        # Split by "Creative Brief #" or similar patterns
+        # Try to split on Creative Brief headers
         brief_splits = re.split(r'(?i)creative\s+brief\s+#\d+:|brief\s+#\d+:', full_text)
         
-        if len(brief_splits) <= 1:
-            # If no clear brief splits found, treat the whole text as one brief
-            return self._extract_single_brief_sections(full_text)
-        
-        # Process each brief section
-        for brief_text in brief_splits[1:]:  # Skip the first split as it's before the first brief
-            brief_sections = {
-                'brief': '',
-                'script': '',
-                'debrief': '',
-                'references': '',
-                'reasoning': ''
-            }
+        if len(brief_splits) > 1:
+            # Found multiple briefs
+            print(f"Found {len(brief_splits)-1} briefs in the document")
             
-            # Extract main script section
-            script_match = re.search(r'(?i)main\s+script:?(.*?)(?=(?:hook\s+variations:|document\s+references:|debrief\s+analysis:|$))', brief_text, re.DOTALL)
-            if script_match:
-                brief_sections['script'] = script_match.group(1).strip()
-            
-            # Extract brief content (everything before Main Script)
-            brief_content = brief_text[:brief_text.lower().find('main script')] if 'main script' in brief_text.lower() else ''
-            brief_sections['brief'] = brief_content.strip()
-            
-            # Extract debrief analysis
-            debrief_match = re.search(r'(?i)debrief\s+analysis:?(.*?)(?=(?:technical\s+requirements:|$))', brief_text, re.DOTALL)
-            if debrief_match:
-                brief_sections['debrief'] = debrief_match.group(1).strip()
-            
-            # Extract document references
-            references_match = re.search(r'(?i)document\s+references\s+and\s+reasoning:?(.*?)(?=(?:debrief\s+analysis:|$))', brief_text, re.DOTALL)
-            if references_match:
-                brief_sections['references'] = references_match.group(1).strip()
-            
-            # Extract reasoning if available
-            reasoning_match = re.search(r'(?i)reasoning:?(.*?)(?=(?:technical\s+requirements:|$))', brief_text, re.DOTALL)
-            if reasoning_match:
-                brief_sections['reasoning'] = reasoning_match.group(1).strip()
-            
+            # Process each brief, skipping the text before the first brief header
+            for i, brief_text in enumerate(brief_splits[1:], 1):
+                # Add the header back
+                brief_match = re.search(r'(?i)(creative\s+brief\s+#\d+:|brief\s+#\d+:)', full_text)
+                header = brief_match.group(1) if brief_match else f"Brief #{i}:"
+                brief_with_header = f"{header} {brief_text}"
+                
+                print(f"\nProcessing Brief #{i}")
+                
+                # Extract sections for this brief
+                brief_sections = self._extract_single_brief_sections(brief_with_header)
+                brief_sections['brief_number'] = i
+                briefs.append(brief_sections)
+        else:
+            # Single brief
+            print("Document appears to contain a single brief")
+            brief_sections = self._extract_single_brief_sections(full_text)
+            brief_sections['brief_number'] = 1
             briefs.append(brief_sections)
-        
+            
         return briefs
 
     def evaluate_ad_script(self, 
@@ -314,7 +298,7 @@ class SocialMediaAdEvaluator:
         # Process each brief
         for idx, brief_sections in enumerate(briefs, 1):
             print(f"\n\n========== EVALUATING BRIEF #{idx} ==========")
-            print(f"Brief title: {self._extract_brief_title(brief_sections['brief'])}")
+            # print(f"Brief title: {self._extract_brief_title(brief_sections['brief'])}")
             print(f"Sections found: {', '.join([k for k, v in brief_sections.items() if v])}")
             print(f"Script length: {len(brief_sections['script'])} characters")
             
@@ -906,157 +890,197 @@ class SocialMediaAdEvaluator:
             
             return single_report
     
-    def _extract_single_brief_sections(self, full_text: str) -> List[Dict[str, str]]:
-        """
-        Extract sections from a text assuming it's a single brief.
+    def _extract_single_brief_sections(self, text: str) -> Dict[str, str]:
+        """Extract brief, script, debrief, and references sections from a single brief.
         
         Args:
-            full_text: The complete text to parse
+            text: The text containing a single brief
             
         Returns:
-            List with a single dictionary containing brief sections
+            Dictionary with brief, script, debrief, and references sections
         """
-        brief_sections = {
-            'brief': '',
-            'script': '',
-            'debrief': '',
-            'references': '',
-            'reasoning': ''
-        }
+        sections = {"brief": "", "script": "", "debrief": "", "references": ""}
         
-        # Try standard regex extraction first
-        brief_sections = self._extract_sections_with_regex(full_text)
+        # Store original text for fallback
+        original_text = text
         
-        # If debrief is missing but we have other sections, try to use LLM to find the debrief
-        if not brief_sections['debrief'] and (brief_sections['brief'] or brief_sections['script']):
-            print("Debrief section not found with regex. Trying LLM extraction...")
-            brief_sections['debrief'] = self._extract_debrief_with_llm(full_text, brief_sections['brief'], brief_sections['script'])
-            if brief_sections['debrief']:
-                print("Successfully extracted debrief section using LLM")
-        
-        # Final fallback if still missing key sections
-        if not brief_sections['brief'] or not brief_sections['script'] or len([k for k, v in brief_sections.items() if v]) < 3:
-            print("WARNING: Insufficient sections found, using fallback approach")
-            brief_sections = self._extract_sections_with_fallback(full_text, brief_sections)
-        
-        return [brief_sections]
-        
-    def _extract_sections_with_regex(self, full_text: str) -> Dict[str, str]:
-        """Extract document sections using regex patterns."""
-        brief_sections = {
-            'brief': '',
-            'script': '',
-            'debrief': '',
-            'references': '',
-            'reasoning': ''
-        }
-        
-        # Look for "Main Script" or similar headers to extract script content
+        # Try to find the script section first (most consistently formatted)
         script_patterns = [
-            r'(?i)main\s+script:?(.*?)(?=(?:hook\s+variations:|document\s+references:|debrief\s+analysis:|$))',
-            r'(?i)content:?(.*?)(?=(?:hook\s+variations:|document\s+references:|debrief\s+analysis:|$))',
-            r'(?i)script\s+content:?(.*?)(?=(?:hook\s+variations:|document\s+references:|debrief\s+analysis:|$))',
-            r'(?i)ad\s+script:?(.*?)(?=(?:hook\s+variations:|document\s+references:|debrief\s+analysis:|$))'
+            r'(?i)main\s+script.*?(?=\n[^\n]+:|\n\s*$|hook\s+breakdown|debrief)',
+            r'(?i)^time\s+script.*?(?=hook\s+breakdown|debrief)',
+            r'(?i)script\s*\(.*?\).*?(?=hook\s+breakdown|debrief)',
+            r'(?i)\b(?:time|sec)[\s\|]+(?:script|dialogue)[\s\|]+visual'
         ]
         
-        # Extract script section
+        script_content = None
+        script_start_pos = len(text)  # Default to end of text
+        
         for pattern in script_patterns:
-            script_match = re.search(pattern, full_text, re.DOTALL)
+            script_match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
             if script_match:
-                brief_sections['script'] = script_match.group(1).strip()
+                script_content = script_match.group(0)
+                script_start_pos = script_match.start()
+                sections["script"] = script_content
                 break
         
-        # If no explicit script section, use the entire text as the script
-        if not brief_sections['script']:
-            brief_sections['script'] = full_text
-        
-        # Find debrief analysis - can be anywhere in the document
+        # Try to find hooks/debrief section (often at the end)
         debrief_patterns = [
-            r'(?i)debrief\s+analysis:?(.*?)(?=(?:technical\s+requirements:|$))',
-            r'(?i)feedback:?(.*?)(?=(?:technical\s+requirements:|$))',
-            r'(?i)analysis:?(.*?)(?=(?:technical\s+requirements:|$))'
+            r'(?i)debrief:?\s*\n(.*?)(?=\s*$)',
+            r'(?i)debrief\s+analysis:?\s*\n(.*?)(?=\s*$)',
+            r'(?i)hook\s+breakdown:.*?debrief:?\s*\n(.*?)(?=\s*$)',
+            r'(?i)(?:feedback|analysis):?\s*\n(.*?)(?=\s*$)'
         ]
+        
+        debrief_content = None
+        debrief_start_pos = len(text)  # Default to end of text
         
         for pattern in debrief_patterns:
-            debrief_match = re.search(pattern, full_text, re.DOTALL)
+            debrief_match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
             if debrief_match:
-                brief_sections['debrief'] = debrief_match.group(1).strip()
+                if debrief_match.groups():
+                    debrief_content = debrief_match.group(1)
+                else:
+                    debrief_content = debrief_match.group(0)
+                debrief_start_pos = debrief_match.start()
+                sections["debrief"] = debrief_content
                 break
+                
+        # If we haven't found a debrief yet, look for Hook Breakdown as it often precedes debrief
+        if not debrief_content:
+            hook_pattern = r'(?i)hook\s+breakdown:?\s*(.*?)(?=\s*$)'
+            hook_match = re.search(hook_pattern, text, re.DOTALL | re.IGNORECASE)
+            if hook_match:
+                hook_content = hook_match.group(0)
+                hook_start_pos = hook_match.start()
+                
+                # If we found hooks, look for debrief after it
+                debrief_after_hook = re.search(r'(?i)debrief:?\s*(.*?)(?=\s*$)', hook_content, re.DOTALL)
+                if debrief_after_hook:
+                    if debrief_after_hook.groups():
+                        debrief_content = debrief_after_hook.group(1)
+                    else:
+                        debrief_content = debrief_after_hook.group(0)
+                    sections["debrief"] = debrief_content
+                    debrief_start_pos = hook_start_pos + debrief_after_hook.start()
         
-        # Extract document references - can be anywhere in the document
+        # Try to find references section
         references_patterns = [
-            r'(?i)document\s+references\s+and\s+reasoning:?(.*?)(?=(?:debrief\s+analysis:|analysis:|feedback:|$))',
-            r'(?i)document\s+references:?(.*?)(?=(?:debrief\s+analysis:|analysis:|feedback:|$))',
-            r'(?i)references:?(.*?)(?=(?:debrief\s+analysis:|analysis:|feedback:|$))'
+            r'(?i)references?:?\s*(.*?)(?=\s*$)',
+            r'(?i)document\s+references?:?\s*(.*?)(?=\s*$)',
+            r'(?i)winning\s+ad\s+transcripts\s+reference:?\s*(.*?)(?=\s*debrief|$)'
         ]
+        
+        references_content = None
+        references_start_pos = len(text)  # Default to end of text
         
         for pattern in references_patterns:
-            references_match = re.search(pattern, full_text, re.DOTALL)
+            references_match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
             if references_match:
-                brief_sections['references'] = references_match.group(1).strip()
+                if references_match.groups():
+                    references_content = references_match.group(1)
+                else:
+                    references_content = references_match.group(0)
+                references_start_pos = references_match.start()
+                sections["references"] = references_content
                 break
         
-        # Find brief content - usually at the beginning
-        # We do this last so that we can exclude other identified sections
-        # Create a modified text by removing the sections we've already found
-        modified_text = full_text
-        for section_type, content in brief_sections.items():
-            if content and section_type != 'brief':
-                # Replace the content with a placeholder to maintain structure
-                modified_text = modified_text.replace(content, f"[{section_type.upper()}_CONTENT]")
+        # Determine brief content - everything from start to the first other section
+        first_section_pos = min(
+            pos for pos in [script_start_pos, debrief_start_pos, references_start_pos]
+            if pos < len(text)
+        )
         
-        # Find text before the Main Script or similar headers
-        brief_before_script = ""
-        script_header_match = re.search(r'(?i)(main\s+script|content|script\s+content|ad\s+script):', modified_text)
-        if script_header_match:
-            brief_before_script = modified_text[:script_header_match.start()].strip()
+        # Everything before the first section is the brief
+        if first_section_pos > 0:
+            brief_content = text[:first_section_pos].strip()
+            sections["brief"] = brief_content
         
-        # Look for explicit brief headers
-        brief_patterns = [
-            r'(?i)creative\s+brief:?(.*?)(?=(?:\[|main\s+script:|content:|script\s+content:|ad\s+script:|$))',
-            r'(?i)brief:?(.*?)(?=(?:\[|main\s+script:|content:|script\s+content:|ad\s+script:|$))'
-        ]
+        # If we're missing sections, try more aggressive pattern matching
+        missing_sections = [section for section, content in sections.items() if not content]
         
-        brief_content = ""
-        for pattern in brief_patterns:
-            brief_match = re.search(pattern, modified_text, re.DOTALL)
-            if brief_match:
-                brief_content = brief_match.group(1).strip()
-                break
+        if missing_sections:
+            # If debrief is missing, try more flexible pattern
+            if "debrief" in missing_sections:
+                # Look for a debrief-like paragraph at the end
+                para_pattern = r'\n\n([^#\n]+(?:\n(?!\n)[^#\n]+)*)$'
+                para_match = re.search(para_pattern, text, re.DOTALL)
+                if para_match:
+                    potential_debrief = para_match.group(1).strip()
+                    # Check if this looks like a debrief (contains analytical keywords)
+                    debrief_keywords = ['strategy', 'principles', 'audience', 'engagement', 'effectiveness', 
+                                       'analysis', 'approach', 'aims to', 'targets', 'combination of']
+                    if any(keyword in potential_debrief.lower() for keyword in debrief_keywords):
+                        sections["debrief"] = potential_debrief
+            
+            # If brief is missing but we have a script, everything before the script is the brief
+            if "brief" in missing_sections and sections["script"]:
+                script_pos = text.find(sections["script"])
+                if script_pos > 0:
+                    sections["brief"] = text[:script_pos].strip()
+            
+            # Still missing sections? Use the LLM extraction as a fallback
+            if len([s for s, c in sections.items() if c]) < 3:
+                llm_sections = self._extract_debrief_with_llm(original_text)
+                if llm_sections:
+                    # Replace any empty sections with LLM-extracted versions
+                    for section, content in llm_sections.items():
+                        if section in sections and not sections[section] and content:
+                            sections[section] = content
         
-        # Use either the explicit brief content or the text before script
-        if brief_content:
-            brief_sections['brief'] = brief_content
-        elif brief_before_script:
-            brief_sections['brief'] = brief_before_script
+        # Additional check - if brief section contains "debrief:" text followed by a paragraph,
+        # extract that part into the debrief section
+        if sections["brief"] and "debrief" in missing_sections:
+            brief_debrief_match = re.search(r'(?i)debrief:?\s*(.*?)(?=\s*$)', sections["brief"], re.DOTALL)
+            if brief_debrief_match:
+                sections["debrief"] = brief_debrief_match.group(1).strip()
+                # Remove the debrief part from the brief
+                sections["brief"] = sections["brief"][:brief_debrief_match.start()].strip()
         
-        # Log what sections were found
-        print(f"Brief sections extracted with regex: {', '.join([k for k, v in brief_sections.items() if v])}")
+        # Last resort - if we have found nothing, use simple position-based splitting
+        if all(not content for content in sections.values()):
+            lines = text.split('\n')
+            total_lines = len(lines)
+            
+            # Rough approximation - first third is brief, middle is script, last part is debrief
+            brief_end = total_lines // 3
+            script_end = (total_lines * 2) // 3
+            
+            sections["brief"] = '\n'.join(lines[:brief_end]).strip()
+            sections["script"] = '\n'.join(lines[brief_end:script_end]).strip()
+            sections["debrief"] = '\n'.join(lines[script_end:]).strip()
         
-        # Final check - if debrief is empty but the brief contains debrief-like content,
-        # try to extract it from the brief
-        if not brief_sections['debrief'] and brief_sections['brief']:
-            for pattern in debrief_patterns:
-                debrief_match = re.search(pattern, brief_sections['brief'], re.DOTALL)
-                if debrief_match:
-                    debrief_content = debrief_match.group(1).strip()
-                    brief_sections['debrief'] = debrief_content
-                    # Remove the debrief content from the brief to avoid duplication
-                    brief_text = brief_sections['brief']
-                    brief_sections['brief'] = brief_text.replace(debrief_content, "").strip()
-                    print("Found debrief section inside brief content")
-                    break
+        # Final check to ensure we're not treating the entire document as a single section
+        if sections["brief"] and len(sections["brief"]) > len(text) * 0.8:
+            # Try one more time with stronger pattern matching
+            script_match = re.search(r'(?i).*?(time|sec).*?(script|dialogue).*?(visual|b-roll)', text, re.DOTALL)
+            if script_match:
+                script_start = script_match.start()
+                sections["brief"] = text[:script_start].strip()
+                
+                # Find where the script might end (look for Hook or Debrief keywords)
+                script_end_match = re.search(r'(?i)hook\s+breakdown|debrief', text[script_start:], re.DOTALL)
+                if script_end_match:
+                    script_end = script_start + script_end_match.start()
+                    sections["script"] = text[script_start:script_end].strip()
+                    sections["debrief"] = text[script_end:].strip()
+                else:
+                    # Assume script is 40% of content after the brief
+                    remaining_length = len(text) - script_start
+                    script_length = int(remaining_length * 0.6)
+                    sections["script"] = text[script_start:script_start+script_length].strip()
+                    sections["debrief"] = text[script_start+script_length:].strip()
         
-        return brief_sections
+        # Log what we found
+        print(f"Sections extracted: {', '.join(s for s, c in sections.items() if c)}")
+        
+        return sections
     
-    def _extract_debrief_with_llm(self, full_text: str, brief_text: str, script_text: str) -> str:
+    def _extract_debrief_with_llm(self, full_text: str) -> Dict[str, str]:
         """
         Use LLM to identify and extract the debrief/feedback section from the text.
         
         Args:
             full_text: The full document text
-            brief_text: The already extracted brief section
-            script_text: The already extracted script section
             
         Returns:
             Extracted debrief section as a string
@@ -1064,32 +1088,27 @@ class SocialMediaAdEvaluator:
         try:
             print("Calling LLM to extract debrief section...")
             
-            # Remove already extracted sections from the text to focus on remaining content
-            modified_text = full_text
-            if brief_text:
-                modified_text = modified_text.replace(brief_text, "[BRIEF_CONTENT]")
-            if script_text:
-                modified_text = modified_text.replace(script_text, "[SCRIPT_CONTENT]")
-            
             # Create prompt for LLM
             prompt = f"""
-            You are tasked with identifying and extracting the debrief/feedback section from a social media ad document.
+            You are tasked with analyzing a social media ad document and extracting specific sections.
             
             DOCUMENT TEXT:
-            {modified_text}
+            {full_text}
             
             TASK:
-            1. Identify any sections that contain feedback, analysis, or debrief information about a previous version of the ad.
-            2. Extract only that specific section.
-            3. Look for content that discusses previous issues, things to improve, or analytical comments.
+            Identify and extract these three distinct sections:
+            1. The creative brief (instructions/requirements for the ad)
+            2. The actual ad script/content
+            3. Any feedback, analysis, or debrief sections
             
             FORMAT YOUR RESPONSE AS JSON:
             {{
-                "debrief_found": true/false,
-                "debrief_text": "the extracted debrief/feedback section"
+                "brief": "extracted brief section",
+                "script": "extracted script section",
+                "debrief": "extracted debrief/feedback section"
             }}
             
-            If no debrief or feedback section is found, set "debrief_found" to false and "debrief_text" to an empty string.
+            If any section is not found, provide an empty string for that section.
             """
             
             # Call OpenAI API
@@ -1104,83 +1123,10 @@ class SocialMediaAdEvaluator:
             response_content = response.choices[0].message.content
             result = json.loads(response_content)
             
-            if result.get("debrief_found", False):
-                debrief_text = result.get("debrief_text", "").strip()
-                if debrief_text:
-                    print(f"LLM successfully identified debrief section ({len(debrief_text)} characters)")
-                    return debrief_text
-            
-            # If still not found, try one more approach with the full text
-            if not brief_text and not script_text:
-                print("Trying one more LLM approach with full text...")
-                
-                prompt = f"""
-                You are tasked with analyzing a social media ad document and extracting specific sections.
-                
-                DOCUMENT TEXT:
-                {full_text}
-                
-                TASK:
-                Identify and extract these three distinct sections:
-                1. The creative brief (instructions/requirements for the ad)
-                2. The actual ad script/content
-                3. Any feedback, analysis, or debrief sections
-                
-                FORMAT YOUR RESPONSE AS JSON:
-                {{
-                    "brief": "extracted brief section",
-                    "script": "extracted script section",
-                    "debrief": "extracted debrief/feedback section"
-                }}
-                
-                If any section is not found, provide an empty string for that section.
-                """
-                
-                response = self.openai_client.chat.completions.create(
-                    model=self.model_name,
-                    messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    temperature=0.3
-                )
-                
-                response_content = response.choices[0].message.content
-                result = json.loads(response_content)
-                
-                return result.get("debrief", "").strip()
-            
-            return ""
+            return result
         except Exception as e:
             print(f"Error during LLM debrief extraction: {str(e)}")
-            return ""
-    
-    def _extract_sections_with_fallback(self, full_text: str, existing_sections: Dict[str, str]) -> Dict[str, str]:
-        """Use fallback approach to extract sections when regular methods fail."""
-        brief_sections = existing_sections.copy()
-        
-        # Split the text into chunks and make educated guesses
-        lines = full_text.split('\n')
-        line_count = len(lines)
-        
-        # Assign first 1/4 to brief if not already assigned
-        if not brief_sections['brief'] and line_count > 4:
-            brief_end = line_count // 4
-            brief_sections['brief'] = '\n'.join(lines[:brief_end])
-        
-        # If we have a script, use that, otherwise use the middle half
-        if not brief_sections['script']:
-            script_start = line_count // 4
-            script_end = line_count * 3 // 4
-            brief_sections['script'] = '\n'.join(lines[script_start:script_end])
-        
-        # Assign last 1/4 to debrief if not already assigned
-        if not brief_sections['debrief'] and line_count > 4:
-            debrief_start = line_count * 3 // 4
-            brief_sections['debrief'] = '\n'.join(lines[debrief_start:])
-        
-        print("Applied fallback section extraction")
-        print(f"Final sections: {', '.join([k for k, v in brief_sections.items() if v])}")
-        
-        return brief_sections
+            return {}
     
     def _generate_single_brief_report(self, evaluation_results: Dict[str, Any]) -> Dict[str, Any]:
         """Generate a report for a single brief evaluation."""
