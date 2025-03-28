@@ -34,16 +34,10 @@ from script_evaluator import ScriptEvaluator
 class SocialMediaAdEvaluator:
     def __init__(self, api_key=None, model_name="gpt-4-turbo-preview"):
         """Initialize the evaluator with OpenAI API key and model name."""
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError("No API key provided and OPENAI_API_KEY environment variable is not set")
-        self.openai_client = OpenAI(api_key=self.api_key)
+        self.openai_client = OpenAI(api_key=api_key)
         self.model_name = model_name
         self.category_display_names = CATEGORY_DISPLAY_NAMES
         self.evaluation_questions = EVALUATION_QUESTIONS
-        
-        # Initialize the script evaluator
-        self.script_evaluator = ScriptEvaluator()
         
         # Load evaluation instructions
         self.evaluation_instructions = {
@@ -54,8 +48,7 @@ class SocialMediaAdEvaluator:
             "system1_assessment": "Evaluate the immediate, intuitive impact of the ad.",
             "system2_validation": "Assess the logical and analytical aspects of the ad.",
             "cognitive_harmony": "Evaluate how well the ad balances emotional and rational elements.",
-            "red_flags": "Check for potential issues or concerns in the ad content.",
-            "hallucination_check": "Verify that all claims, features, benefits, and specifications mentioned in the ad are factually accurate and supported by the reference materials."
+            "red_flags": "Check for potential issues or concerns in the ad content."
         }
         
         # Define verification instructions
@@ -243,8 +236,7 @@ FORMAT YOUR RESPONSE AS JSON ARRAY:
             print(f"Total Score: {brief_report['total_score']}/{brief_report['max_possible_score']} ({brief_report['percentage_score']:.1f}%)")
             print("Category Scores:")
             for category, score in brief_report['category_scores'].items():
-                max_score = brief_report['category_max_scores'].get(category, 0)
-                print(f"  - {self.category_display_names[category]}: {score}/{max_score}")
+                print(f"  - {self.category_display_names[category]}: {score}/10")
             print("Recommendations:")
             for rec in brief_report['recommendations']:
                 print(f"  - {rec}")
@@ -269,14 +261,11 @@ FORMAT YOUR RESPONSE AS JSON ARRAY:
         
         return "Untitled Brief"
     
-    def _evaluate_with_context(self, script_text: str, context_text: str, context_type: str, 
-                          criteria: str, instructions: str) -> Dict[str, Any]:
-        """Generic evaluation helper that handles various context types.
+    def _evaluate_criteria(self, script_text: str, criteria: str, instructions: str) -> Dict[str, Any]:
+        """Evaluate the script based on specified criteria.
         
         Args:
             script_text: The ad script text to evaluate
-            context_text: Additional context to include (brief, debrief, references)
-            context_type: Type of context ("brief", "debrief", "references", or "none")
             criteria: The evaluation criteria to use
             instructions: The evaluation instructions
             
@@ -285,152 +274,79 @@ FORMAT YOUR RESPONSE AS JSON ARRAY:
         """
         try:
             # Get questions for this category
-            questions = self.get_questions_for_category(criteria)
+            questions = self.evaluation_questions[criteria]
             total_questions = len(questions)
             
-            context_description = f" with {context_type} context" if context_type != "none" else ""
-            print(f"\nEvaluating {criteria}{context_description}")
+            print(f"\nEvaluating {criteria}")
             print(f"Script length: {len(script_text)} characters")
-            if context_type != "none":
-                print(f"{context_type.capitalize()} length: {len(context_text)} characters")
             print(f"Number of questions: {total_questions}")
             
-            if total_questions == 0:
-                print(f"Warning: No questions found for category {criteria}")
-                return {
-                    "score": 0.0,
-                    "total_questions": total_questions,
-                    "yes_count": 0,
-                    "evaluation": [],
-                    "feedback": f"No questions found for category {criteria}"
-                }
+            # Prepare the evaluation prompt
+            prompt = f"""Please evaluate the following ad script based on these specific questions.
             
-            # Create the questions JSON array for the prompt
-            questions_json = []
-            for i, question in enumerate(questions, 1):
-                questions_json.append({"id": i, "text": question})
-            
-            # Build the prompt based on context type
-            prompt = f"""Please evaluate this ad script based on the specified criteria."""
-            
-            prompt += f"""
-
-AD SCRIPT TO EVALUATE:
+Ad Script:
 {script_text}
 
-"""
-            
-            # Add appropriate context section if available
-            if context_type != "none" and context_text:
-                prompt += f"""{context_type.upper()} CONTEXT:
-{context_text}
+Please answer each question with a 'Yes' or 'No' and provide brief reasoning:
 
 """
+            # Add each question
+            for i, question in enumerate(questions, 1):
+                prompt += f"{i}. {question}\n"
             
-            # Add criteria and questions
-            prompt += f"""EVALUATION CRITERIA:
-{instructions}
-
-QUESTIONS TO ANSWER:
-{json.dumps(questions_json, indent=2)}
-
-INSTRUCTIONS:
-1. Answer each question with 'Yes' or 'No'
-2. Provide brief reasoning for each answer
-3. Return your evaluation ONLY as JSON with this EXACT structure:
-
-{{
-  "evaluation": [
-    {{
-      "Question": "question text here",
-      "Answer": "Yes",
-      "Reasoning": "brief explanation here"
-    }},
-    {{
-      "Question": "question text here",
-      "Answer": "No",
-      "Reasoning": "brief explanation here"
-    }}
-  ]
-}}
-
-DO NOT include any text outside of this JSON structure.
+            # Add format instructions
+            prompt += """
+IMPORTANT: Return your evaluation as a JSON array in this exact format:
+[
+  {
+    "Question": "Question text here",
+    "Answer": "Yes",  // Must be exactly "Yes" or "No"
+    "Reasoning": "Brief explanation here"
+  },
+  // ... and so on for all questions
+]
 """
             
             print("\nSending request to OpenAI API...")
             response = self.openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": "You are a specialized evaluator that returns well-formatted JSON responses according to the exact schema requested."},
+                    {"role": "system", "content": instructions},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0,
-                response_format={"type": "json_object"}
+                temperature=0.7
             )
             print("Received response from OpenAI API")
             
             # Parse the response
             try:
-                response_content = response.choices[0].message.content.strip()
-                print("Raw response:", response_content[:200] + "..." if len(response_content) > 200 else response_content)
-                
-                # Parse the JSON response
-                parsed_json = json.loads(response_content)
-                
-                # Extract the evaluation array
-                if "evaluation" in parsed_json and isinstance(parsed_json["evaluation"], list):
-                    evaluation = parsed_json["evaluation"]
-                else:
-                    # Try to find any array in the response
-                    found_array = False
-                    for key, value in parsed_json.items():
-                        if isinstance(value, list) and len(value) > 0:
-                            evaluation = value
-                            found_array = True
-                            break
-                    
-                    if not found_array:
-                        print("No array found in response")
-                        evaluation = []
-                
-                if not evaluation:
-                    print("Failed to extract valid evaluation from response")
-                    return {
-                        "score": 0.0,
-                        "total_questions": total_questions,
-                        "yes_count": 0,
-                        "evaluation": [],
-                        "feedback": "Failed to extract evaluation from response"
-                    }
-                
+                evaluation = json.loads(response.choices[0].message.content)
                 print(f"Parsed {len(evaluation)} evaluation items")
                 
-                # Calculate raw score (count of "Yes" answers)
-                score = sum(1 for item in evaluation if isinstance(item, dict) and item.get("Answer", "").lower() == "yes")
+                # Calculate score (1 point for each "Yes")
+                score = sum(1 for item in evaluation if item["Answer"] == "Yes")
+                normalized_score = (score / total_questions) * 10
                 
                 print(f"\nEvaluation Results:")
                 print(f"Total Questions: {total_questions}")
                 print(f"Yes Answers: {score}")
-                print(f"Score: {score}/{total_questions}")
+                print(f"Score: {normalized_score:.2f}/10")
                 
                 print("\nDetailed Feedback:")
-                feedback_items = []
                 for item in evaluation:
-                    if isinstance(item, dict):
-                        question = item.get("Question", "Unknown question")
-                        answer = item.get("Answer", "No answer")
-                        reasoning = item.get("Reasoning", "No reasoning provided")
-                        print(f"Q: {question}")
-                        print(f"A: {answer}")
-                        print(f"R: {reasoning}\n")
-                        feedback_items.append(f"- {question}: {answer} - {reasoning}")
+                    print(f"Q: {item['Question']}")
+                    print(f"A: {item['Answer']}")
+                    print(f"R: {item['Reasoning']}\n")
                 
                 return {
-                    "score": score,
+                    "score": normalized_score,
                     "total_questions": total_questions,
                     "yes_count": score,
                     "evaluation": evaluation,
-                    "feedback": "\n".join(feedback_items)
+                    "feedback": "\n".join([
+                        f"- {item['Question']}: {item['Answer']} - {item['Reasoning']}"
+                        for item in evaluation
+                    ])
                 }
                 
             except json.JSONDecodeError as e:
@@ -448,51 +364,185 @@ DO NOT include any text outside of this JSON structure.
             print(f"Error in criteria evaluation: {str(e)}")
             return {
                 "score": 0.0,
-                "total_questions": total_questions,
+                "total_questions": 0,
                 "yes_count": 0,
                 "evaluation": [],
                 "feedback": f"Error in criteria evaluation: {str(e)}"
             }
-
-    def _evaluate_criteria(self, script_text: str, criteria: str, instructions: str) -> Dict[str, Any]:
-        """Evaluate the script based on specified criteria without additional context."""
-        return self._evaluate_with_context(
-            script_text=script_text,
-            context_text="",
-            context_type="none",
-            criteria=criteria,
-            instructions=instructions
-        )
     
     def _evaluate_criteria_with_brief(self, script_text: str, brief_text: str, criteria: str, instructions: str) -> Dict[str, Any]:
         """Evaluate a single criteria using LLM with brief context."""
-        return self._evaluate_with_context(
-            script_text=script_text,
-            context_text=brief_text,
-            context_type="brief",
-            criteria=criteria,
-            instructions=instructions
-        )
+        try:
+            # Create prompt with detailed instructions and brief context
+            prompt = f"""
+            You are evaluating a social media ad script based on specific criteria and a brief.
+
+            BRIEF:
+            {brief_text}
+
+            CRITERIA TO EVALUATE: {criteria}
+
+            EVALUATION INSTRUCTIONS:
+            {instructions}
+
+            SCRIPT TO EVALUATE:
+            {script_text}
+            """
+            
+            # Call the OpenAI API
+            response = openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "You are an expert ad script evaluator. Provide detailed, objective evaluations in the exact JSON format specified."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            
+            # Parse the response
+            evaluation = json.loads(response.choices[0].message.content)
+            
+            # Calculate score based on Yes/No answers
+            total_questions = len(evaluation)
+            yes_answers = sum(1 for item in evaluation if item["Answer"].lower() == "yes")
+            score = (yes_answers / total_questions) * 10 if total_questions > 0 else 0
+            
+            # Format feedback as a string
+            feedback_lines = []
+            for item in evaluation:
+                feedback_lines.append(f"{item['Question']}\nAnswer: {item['Answer']}\nReasoning: {item['Reasoning']}\n")
+            formatted_feedback = "\n".join(feedback_lines)
+            
+            return {
+                "score": round(score, 2),
+                "reasoning": formatted_feedback,
+                "details": evaluation
+            }
+            
+        except Exception as e:
+            logger.error(f"Error evaluating {criteria} with brief: {str(e)}")
+            return {
+                "score": 0,
+                "reasoning": f"Error during evaluation: {str(e)}",
+                "details": []
+            }
     
     def _evaluate_criteria_with_debrief(self, script_text: str, debrief_text: str, criteria: str, instructions: str) -> Dict[str, Any]:
         """Evaluate a single criteria using LLM with debrief context."""
-        return self._evaluate_with_context(
-            script_text=script_text,
-            context_text=debrief_text,
-            context_type="debrief",
-            criteria=criteria,
-            instructions=instructions
-        )
+        try:
+            # Create prompt with detailed instructions and debrief context
+            prompt = f"""
+            You are evaluating a social media ad script based on specific criteria and a debrief.
+
+            DEBRIEF:
+            {debrief_text}
+
+            CRITERIA TO EVALUATE: {criteria}
+
+            EVALUATION INSTRUCTIONS:
+            {instructions}
+
+            SCRIPT TO EVALUATE:
+            {script_text}
+            """
+            
+            # Call the OpenAI API
+            response = openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "You are an expert ad script evaluator. Provide detailed, objective evaluations in the exact JSON format specified."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            
+            # Parse the response
+            evaluation = json.loads(response.choices[0].message.content)
+            
+            # Calculate score based on Yes/No answers
+            total_questions = len(evaluation)
+            yes_answers = sum(1 for item in evaluation if item["Answer"].lower() == "yes")
+            score = (yes_answers / total_questions) * 10 if total_questions > 0 else 0
+            
+            # Format feedback as a string
+            feedback_lines = []
+            for item in evaluation:
+                feedback_lines.append(f"{item['Question']}\nAnswer: {item['Answer']}\nReasoning: {item['Reasoning']}\n")
+            formatted_feedback = "\n".join(feedback_lines)
+            
+            return {
+                "score": round(score, 2),
+                "reasoning": formatted_feedback,
+                "details": evaluation
+            }
+            
+        except Exception as e:
+            logger.error(f"Error evaluating {criteria} with debrief: {str(e)}")
+            return {
+                "score": 0,
+                "reasoning": f"Error during evaluation: {str(e)}",
+                "details": []
+            }
     
     def _evaluate_criteria_with_references(self, script_text: str, references_text: str, criteria: str, instructions: str) -> Dict[str, Any]:
         """Evaluate a single criteria using LLM with references context."""
-        return self._evaluate_with_context(
-            script_text=script_text,
-            context_text=references_text,
-            context_type="references",
-            criteria=criteria,
-            instructions=instructions
-        )
+        try:
+            # Create prompt with detailed instructions and references context
+            prompt = f"""
+            You are evaluating a social media ad script based on specific criteria and reference materials.
+
+            REFERENCES:
+            {references_text}
+
+            CRITERIA TO EVALUATE: {criteria}
+
+            EVALUATION INSTRUCTIONS:
+            {instructions}
+
+            SCRIPT TO EVALUATE:
+            {script_text}
+            """
+            
+            # Call the OpenAI API
+            response = openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "You are an expert ad script evaluator. Provide detailed, objective evaluations in the exact JSON format specified."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1000
+            )
+            
+            # Parse the response
+            evaluation = json.loads(response.choices[0].message.content)
+            
+            # Calculate score based on Yes/No answers
+            total_questions = len(evaluation)
+            yes_answers = sum(1 for item in evaluation if item["Answer"].lower() == "yes")
+            score = (yes_answers / total_questions) * 10 if total_questions > 0 else 0
+            
+            # Format feedback as a string
+            feedback_lines = []
+            for item in evaluation:
+                feedback_lines.append(f"{item['Question']}\nAnswer: {item['Answer']}\nReasoning: {item['Reasoning']}\n")
+            formatted_feedback = "\n".join(feedback_lines)
+            
+            return {
+                "score": round(score, 2),
+                "reasoning": formatted_feedback,
+                "details": evaluation
+            }
+            
+        except Exception as e:
+            logger.error(f"Error evaluating {criteria} with references: {str(e)}")
+            return {
+                "score": 0,
+                "reasoning": f"Error during evaluation: {str(e)}",
+                "details": []
+            }
     
     def _compare_with_winning_ads(self, script_text: str, winning_ads_text: str, instructions: str) -> Dict[str, Any]:
         """Compare script with winning ad examples and evaluate it."""
@@ -527,13 +577,13 @@ DO NOT include any text outside of this JSON structure.
             
             print("\nSending request to OpenAI API...")
             # Call the OpenAI API
-            response = self.openai_client.chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": "You are an expert ad evaluator. Compare the script with winning examples and provide responses in the exact JSON format specified."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0,
+                temperature=0.7,
                 max_tokens=1000
             )
             
@@ -688,7 +738,7 @@ DO NOT include any text outside of this JSON structure.
                     {"role": "user", "content": prompt}
                 ],
                 response_format={"type": "json_object"},
-                temperature=0
+                temperature=0.0,
             )
             
             result = json.loads(response.choices[0].message.content)
@@ -713,26 +763,24 @@ DO NOT include any text outside of this JSON structure.
         
         # Define all possible score categories
         score_categories = [
-            "creativity", "emotional_appeal", "relevance_clarity", "natural_language",
-            "system1_assessment", "system2_validation", "cognitive_harmony",
-            "red_flags", "hallucination_check"
+            "creativity", "ad_brief_alignment", "debrief_analysis", 
+            "hallucination_check", "relevance_clarity", "emotional_appeal", 
+            "natural_language", "winning_ads_comparison"
         ]
         
-        # Initialize total questions count for calculating maximum possible score
-        max_possible_score = 0
+        # Fixed maximum possible score - 8 categories, 10 points each
+        max_possible_score = 80
         
-        # Calculate total score
+        # Calculate total score (excluding verification which is pass/fail)
         total_score = 0
         
         # Initialize category scores and feedback for all categories
         category_scores = {}
-        category_max_scores = {}
         detailed_feedback = {}
         
         # Set default values for all categories
         for category in score_categories:
             category_scores[category] = 0
-            category_max_scores[category] = 0
             detailed_feedback[category] = "Not evaluated"
         
         # Update with actual scores and feedback where available
@@ -741,32 +789,20 @@ DO NOT include any text outside of this JSON structure.
                 category_result = evaluation_results[category]
                 if isinstance(category_result, dict) and "score" in category_result:
                     score = category_result["score"]
-                    total_questions = category_result.get("total_questions", 0)
-                    print(f"Found score for {category}: {score}/{total_questions}")
-                    
+                    print(f"Found score for {category}: {score}")
                     total_score += score
-                    max_possible_score += total_questions
-                    
                     category_scores[category] = score
-                    category_max_scores[category] = total_questions
-                    
-                    # Handle feedback based on different formats
-                    if "feedback" in category_result:
-                        detailed_feedback[category] = category_result["feedback"]
-                    elif "reasoning" in category_result:
+                    if "reasoning" in category_result:
                         detailed_feedback[category] = category_result["reasoning"]
-                    elif "evaluation" in category_result:
-                        # Format evaluation items
-                        detailed_feedback[category] = category_result["evaluation"]
                 else:
                     print(f"WARNING: Category {category} has invalid structure: {category_result}")
             else:
                 print(f"WARNING: Category {category} not found in evaluation results - using default score of 0")
         
-        print(f"Total score: {total_score}/{max_possible_score} ({(total_score/max_possible_score)*100:.1f}% if max_possible_score > 0 else 0)")
+        print(f"Total score: {total_score}/{max_possible_score} ({(total_score/max_possible_score)*100:.1f}%)")
         
         # Generate recommendations based on scores
-        recommendations = self._generate_recommendations(evaluation_results, category_max_scores)
+        recommendations = self._generate_recommendations(evaluation_results)
         
         # Create final report
         report = {
@@ -774,17 +810,23 @@ DO NOT include any text outside of this JSON structure.
             "brief_title": evaluation_results.get("brief_title", "Untitled Brief"),
             "total_score": total_score,
             "max_possible_score": max_possible_score,
-            "percentage_score": (total_score / max_possible_score) * 100 if max_possible_score > 0 else 0,
+            "percentage_score": (total_score / max_possible_score) * 100,
             "category_scores": category_scores,
-            "category_max_scores": category_max_scores,
-            "verification_result": True,  # Default to true since we're not using separate verification
+            "verification_result": False,
             "detailed_feedback": detailed_feedback,
             "recommendations": recommendations
         }
         
+        # Add verification result if available
+        if "verification" in evaluation_results:
+            verification_result = evaluation_results["verification"]
+            if isinstance(verification_result, dict):
+                report["verification_result"] = verification_result.get("passed", False)
+                report["detailed_feedback"]["verification"] = verification_result.get("details", "Not evaluated")
+        
         return report
     
-    def _generate_recommendations(self, results: Dict[str, Any], category_max_scores: Dict[str, int]) -> List[str]:
+    def _generate_recommendations(self, results: Dict[str, Any]) -> List[str]:
         """Generate recommendations based on evaluation results."""
         recommendations = []
         
@@ -796,8 +838,7 @@ DO NOT include any text outside of this JSON structure.
                 
             if isinstance(result, dict) and "score" in result:
                 score = result["score"]
-                max_score = category_max_scores.get(category, 0)
-                if max_score > 0 and score / max_score >= 0.8:  # 80% or better is a strength
+                if score >= 8:
                     strengths.append(category.replace("_", " ").title())
         
         if strengths:
@@ -811,8 +852,7 @@ DO NOT include any text outside of this JSON structure.
                 
             if isinstance(result, dict) and "score" in result:
                 score = result["score"]
-                max_score = category_max_scores.get(category, 0)
-                if max_score > 0 and score / max_score < 0.6:  # Less than 60% needs improvement
+                if score < 6:
                     reasoning = result.get("reasoning", "")
                     # Handle both string and dictionary reasoning
                     if isinstance(reasoning, str):
@@ -844,8 +884,7 @@ DO NOT include any text outside of this JSON structure.
         winning_comparison = results.get("winning_ads_comparison", {})
         if isinstance(winning_comparison, dict) and "score" in winning_comparison:
             winning_score = winning_comparison["score"]
-            winning_max = winning_comparison.get("total_questions", 10)
-            if winning_max > 0 and winning_score / winning_max >= 0.7:  # 70% or better
+            if winning_score >= 7:
                 recommendations.append("Strong Alignment with Winning Ads: This ad matches successful examples well.")
             else:
                 recommendations.append("Improve Alignment with Winning Ads: Consider incorporating more elements from successful examples.")
@@ -889,30 +928,25 @@ DO NOT include any text outside of this JSON structure.
             
             # Data rows for each brief
             for brief in evaluation_results["evaluations"]:
-                category_scores = brief.get("category_scores", {})
-                category_max_scores = brief.get("category_max_scores", {})
-                
                 writer.writerow([
                     brief.get("brief_number", ""),
                     brief.get("brief_title", ""),
-                    f"{brief.get('total_score', 0)}",
+                    f"{brief.get('total_score', 0):.1f}",
                     brief.get("max_possible_score", 0),
                     f"{brief.get('percentage_score', 0):.1f}%",
-                    f"{category_scores.get('creativity', 0)}/{category_max_scores.get('creativity', 0)}",
-                    f"{category_scores.get('emotional_appeal', 0)}/{category_max_scores.get('emotional_appeal', 0)}",
-                    f"{category_scores.get('relevance_clarity', 0)}/{category_max_scores.get('relevance_clarity', 0)}",
-                    f"{category_scores.get('natural_language', 0)}/{category_max_scores.get('natural_language', 0)}",
-                    f"{category_scores.get('system1_assessment', 0)}/{category_max_scores.get('system1_assessment', 0)}",
-                    f"{category_scores.get('system2_validation', 0)}/{category_max_scores.get('system2_validation', 0)}",
-                    f"{category_scores.get('cognitive_harmony', 0)}/{category_max_scores.get('cognitive_harmony', 0)}",
-                    f"{category_scores.get('red_flags', 0)}/{category_max_scores.get('red_flags', 0)}",
-                    f"{category_scores.get('hallucination_check', 0)}/{category_max_scores.get('hallucination_check', 0)}"
+                    f"{brief.get('category_scores', {}).get('creativity', 0)}/10",
+                    f"{brief.get('category_scores', {}).get('emotional_appeal', 0)}/10",
+                    f"{brief.get('category_scores', {}).get('relevance_clarity', 0)}/10",
+                    f"{brief.get('category_scores', {}).get('natural_language', 0)}/10",
+                    f"{brief.get('category_scores', {}).get('system1_assessment', 0)}/10",
+                    f"{brief.get('category_scores', {}).get('system2_validation', 0)}/10",
+                    f"{brief.get('category_scores', {}).get('cognitive_harmony', 0)}/10",
+                    f"{brief.get('category_scores', {}).get('red_flags', 0)}/10",
+                    f"{brief.get('category_scores', {}).get('hallucination_check', 0)}/10"
                 ])
         else:
             # Single brief case
             brief = evaluation_results
-            category_scores = brief.get("category_scores", {})
-            category_max_scores = brief.get("category_max_scores", {})
             
             # Header row
             writer.writerow(["Category", "Score"])
@@ -926,9 +960,8 @@ DO NOT include any text outside of this JSON structure.
             # Category scores
             writer.writerow([])
             writer.writerow(["CATEGORY SCORES", ""])
-            for category, score in category_scores.items():
-                max_score = category_max_scores.get(category, 0)
-                writer.writerow([category.replace("_", " ").title(), f"{score}/{max_score}"])
+            for category, score in brief.get("category_scores", {}).items():
+                writer.writerow([category.replace("_", " ").title(), f"{score}/10"])
             
             # Recommendations
             writer.writerow([])
@@ -1025,17 +1058,14 @@ DO NOT include any text outside of this JSON structure.
                 
                 # Add rows for each category
                 categories = brief.get("category_scores", {})
-                category_max_scores = brief.get("category_max_scores", {})
                 for category, score in categories.items():
                     category_display = category.replace("_", " ").title()
-                    max_score = category_max_scores.get(category, 0)
-                    score_percentage = (score / max_score * 100) if max_score > 0 else 0
-                    score_class = "high-score" if score_percentage >= 70 else "medium-score" if score_percentage >= 50 else "low-score"
+                    score_class = "high-score" if score >= 7 else "medium-score" if score >= 5 else "low-score"
                     
                     html_output += f'''
                     <tr>
                         <td>{category_display}</td>
-                        <td class="score {score_class}">{score}/{max_score}</td>
+                        <td class="score {score_class}">{score}/10</td>
                     </tr>
                     '''
                 
@@ -1101,17 +1131,14 @@ DO NOT include any text outside of this JSON structure.
             
             # Add rows for each category
             categories = brief.get("category_scores", {})
-            category_max_scores = brief.get("category_max_scores", {})
             for category, score in categories.items():
                 category_display = category.replace("_", " ").title()
-                max_score = category_max_scores.get(category, 0)
-                score_percentage = (score / max_score * 100) if max_score > 0 else 0
-                score_class = "high-score" if score_percentage >= 70 else "medium-score" if score_percentage >= 50 else "low-score"
+                score_class = "high-score" if score >= 7 else "medium-score" if score >= 5 else "low-score"
                 
                 html_output += f'''
                 <tr>
                     <td>{category_display}</td>
-                    <td class="score {score_class}">{score}/{max_score}</td>
+                    <td class="score {score_class}">{score}/10</td>
                 </tr>
                 '''
             
@@ -1151,7 +1178,7 @@ DO NOT include any text outside of this JSON structure.
         </html>
         '''
         
-        return html_output
+        return html_output 
 
     def _evaluate_creativity(self, script: str) -> Tuple[float, str]:
         """Evaluate the creativity of the ad script."""
@@ -1161,7 +1188,7 @@ DO NOT include any text outside of this JSON structure.
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0
+                temperature=0.3
             )
             content = response.choices[0].message.content
             
@@ -1204,7 +1231,7 @@ DO NOT include any text outside of this JSON structure.
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0
+                temperature=0.3
             )
             content = response.choices[0].message.content
             
@@ -1247,7 +1274,7 @@ DO NOT include any text outside of this JSON structure.
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0
+                temperature=0.3
             )
             content = response.choices[0].message.content
             
@@ -1290,7 +1317,7 @@ DO NOT include any text outside of this JSON structure.
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0
+                temperature=0.3
             )
             content = response.choices[0].message.content
             
@@ -1333,7 +1360,7 @@ DO NOT include any text outside of this JSON structure.
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0
+                temperature=0.3
             )
             content = response.choices[0].message.content
             
@@ -1376,7 +1403,7 @@ DO NOT include any text outside of this JSON structure.
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0
+                temperature=0.3
             )
             content = response.choices[0].message.content
             
@@ -1444,13 +1471,13 @@ DO NOT include any text outside of this JSON structure.
             
             print("\nSending request to OpenAI API...")
             # Call the OpenAI API
-            response = self.openai_client.chat.completions.create(
+            response = openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": "You are an expert fact-checker. Verify all claims against reference documents and provide responses in the exact JSON format specified."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0,
+                temperature=0.7,
                 max_tokens=1000
             )
             
@@ -1507,7 +1534,7 @@ DO NOT include any text outside of this JSON structure.
                 model=self.model_name,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0
+                temperature=0.3
             )
             content = response.choices[0].message.content
             
@@ -1682,8 +1709,7 @@ def main():
             print(f"Total Score: {brief['total_score']}/{brief['max_possible_score']} ({brief['percentage_score']:.1f}%)")
             print("\nCategory Scores:")
             for category, score in brief['category_scores'].items():
-                max_score = brief['category_max_scores'].get(category, 0)
-                print(f"  - {self.category_display_names[category]}: {score}/{max_score}")
+                print(f"  - {category}: {score}/10")
             print(f"Verification: {'PASSED' if brief['verification_result'] else 'FAILED'}")
             print("\nRecommendations:")
             for rec in brief['recommendations']:

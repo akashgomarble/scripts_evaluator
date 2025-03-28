@@ -185,10 +185,10 @@ class ScriptEvaluator:
             response = self.openai_client.chat.completions.create(
                 model=self.model_name,
                 messages=[
-                    {"role": "system", "content": instructions},
+                    {"role": "system", "content": "You are an expert at extracting structured information from text."},
                     {"role": "user", "content": f"Script text: {text}"}
                 ],
-                temperature=0.7
+                temperature=0
             )
             
             content = response.choices[0].message.content

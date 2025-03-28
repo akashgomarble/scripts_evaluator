@@ -7,8 +7,10 @@ import tempfile
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from social_media_ad_evaluator import SocialMediaAdEvaluator
+from evaluation_criteria import EVALUATION_CRITERIA
 import re
 import datetime
+from evaluation_questions import EVALUATION_QUESTIONS, CATEGORY_DISPLAY_NAMES
 
 # Load environment variables
 load_dotenv()
@@ -29,10 +31,13 @@ def save_text_to_file(text: str) -> str:
         tmp_file.write(text.encode('utf-8'))
         return tmp_file.name
 
-def create_radar_chart(scores: Dict[str, float]) -> go.Figure:
+def create_radar_chart(scores: Dict[str, float], max_scores: Dict[str, float]) -> go.Figure:
     """Create a radar chart for evaluation scores."""
     categories = [cat.replace('_', ' ').title() for cat in scores.keys()]
     values = list(scores.values())
+    
+    # Find the highest max_score for radar chart scale
+    max_value = max(max(max_scores.values()), 10)  # At least 10 for visibility
     
     fig = go.Figure()
     
@@ -47,7 +52,7 @@ def create_radar_chart(scores: Dict[str, float]) -> go.Figure:
         polar=dict(
             radialaxis=dict(
                 visible=True,
-                range=[0, 10]  # Scale is 0-10
+                range=[0, max_value]  # Scale based on max scores
             )),
         showlegend=False,
         title="Ad Script Evaluation Scores"
@@ -55,105 +60,336 @@ def create_radar_chart(scores: Dict[str, float]) -> go.Figure:
     
     return fig
 
-def display_evaluation_results(report: Dict[str, Any]):
+def add_download_buttons(report, location_prefix="main"):
+    """Add buttons to download the report in various formats."""
+    st.subheader("📥 Download Report")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    # Create an instance of SocialMediaAdEvaluator to access the report generation methods
+    evaluator = SocialMediaAdEvaluator()
+    
+    # Generate a timestamp for filenames
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # JSON download
+    with col1:
+        json_data = json.dumps(report, indent=4)
+        st.download_button(
+            label="Download JSON",
+            data=json_data,
+            file_name=f"ad_evaluation_{timestamp}.json",
+            mime="application/json",
+            help="Download the full evaluation results in JSON format",
+            key=f"{location_prefix}_download_json"
+        )
+    
+    # CSV download
+    with col2:
+        csv_data = evaluator.generate_csv_report(report)
+        st.download_button(
+            label="Download CSV",
+            data=csv_data,
+            file_name=f"ad_evaluation_{timestamp}.csv",
+            mime="text/csv",
+            help="Download the evaluation results in CSV format for easy spreadsheet analysis",
+            key=f"{location_prefix}_download_csv"
+        )
+    
+    # HTML download
+    with col3:
+        html_data = evaluator.generate_html_report(report)
+        st.download_button(
+            label="Download HTML Report",
+            data=html_data,
+            file_name=f"ad_evaluation_{timestamp}.html",
+            mime="text/html",
+            help="Download a formatted HTML report with visualizations",
+            key=f"{location_prefix}_download_html"
+        )
+
+def display_evaluation_results(report):
     """Display evaluation results in a structured format."""
     st.header("Evaluation Results")
-
+    
+    # Add download buttons at the top
+    add_download_buttons(report, location_prefix="results")
+    
+    # Handle both single evaluation and multiple evaluations
     if "evaluations" in report:
-        # Multiple briefs case
-        st.write(f"Total Briefs Evaluated: {report['total_briefs']}")
-        
-        for brief_eval in report["evaluations"]:
-            st.subheader(f"Brief #{brief_eval['brief_number']}: {brief_eval['brief_title']}")
+        for brief in report["evaluations"]:
+            st.subheader(f"Brief #{brief['brief_number']}: {brief['brief_title']}")
             
-            # Display scores
-            st.metric("Total Score", 
-                     f"{brief_eval['total_score']:.1f}/{brief_eval['max_possible_score']} ({brief_eval['percentage_score']:.1f}%)")
+            # Display overall score
+            st.metric("Overall Score", f"{brief['total_score']}/{brief['max_possible_score']} ({brief['percentage_score']:.1f}%)")
             
-            # Display category scores in columns
-            st.write("Category Scores:")
-            cols = st.columns(4)  # Adjust number of columns as needed
-            for idx, (category, score) in enumerate(brief_eval['category_scores'].items()):
-                with cols[idx % 4]:
-                    st.metric(category.replace('_', ' ').title(), f"{score}/10")
+            # Display category scores
+            st.subheader("Category Scores")
+            for category, score in brief['category_scores'].items():
+                max_score = brief['category_max_scores'].get(category, 0)
+                st.metric(category.replace("_", " ").title(), f"{score}/{max_score}")
             
-            # Display verification result
-            st.write("Fact Verification:", 
-                    "✅ Passed" if brief_eval['verification_result'] else "❌ Failed")
-            
-            # Display detailed feedback in an expander
-            with st.expander("See Detailed Feedback"):
-                for category, feedback in brief_eval['detailed_feedback'].items():
-                    st.write(f"**{category.replace('_', ' ').title()}:**")
-                    st.write(feedback)
+            # Display verification status
+            st.subheader("Verification Status")
+            verification_status = "PASSED" if brief['verification_result'] else "FAILED"
+            st.metric("Status", verification_status, delta=None)
             
             # Display recommendations
-            st.write("Recommendations:")
-            for rec in brief_eval['recommendations']:
-                st.write(f"- {rec}")
+            st.subheader("Recommendations")
+            for rec in brief['recommendations']:
+                st.write(f"• {rec}")
             
-            st.divider()  # Add visual separator between briefs
-    elif "total_score" in report:
-        # Single brief case (backwards compatibility)
-        # Display scores
-        st.metric("Total Score", 
-                 f"{report['total_score']:.1f}/{report['max_possible_score']} ({report['percentage_score']:.1f}%)")
+            # Display detailed feedback
+            st.subheader("Detailed Feedback")
+            for category, feedback in brief['detailed_feedback'].items():
+                with st.expander(category.replace("_", " ").title()):
+                    if isinstance(feedback, str):
+                        # Try to parse feedback into question-answer-reasoning format
+                        # Look for patterns like "Question: X, Answer: Y, Reasoning: Z"
+                        items = []
+                        # Split by question format
+                        question_pattern = r'- ([^:]+): (Yes|No) - (.+?)(?=- [^:]+: |$)'
+                        matches = re.findall(question_pattern, feedback, re.DOTALL)
+                        
+                        if matches:
+                            for question, answer, reasoning in matches:
+                                # Display with proper formatting
+                                st.markdown(f"**Question:** {question.strip()}")
+                                
+                                # Color-code the answer
+                                if answer.lower() == 'yes':
+                                    st.success(f"**Answer:** {answer}")
+                                else:
+                                    st.error(f"**Answer:** {answer}")
+                                
+                                st.markdown(f"**Reasoning:** {reasoning.strip()}")
+                                st.divider()
+                        else:
+                            # Try another pattern: splitting by line breaks and looking for Question, Answer, Reasoning prefixes
+                            lines = feedback.split('\n')
+                            i = 0
+                            while i < len(lines):
+                                line = lines[i].strip()
+                                if line.startswith("Question:") or line.startswith("- "):
+                                    question = line.replace("Question:", "").replace("- ", "").strip()
+                                    
+                                    # Look for Answer
+                                    answer = ""
+                                    reasoning = ""
+                                    
+                                    # Try to find answer in the same line or next lines
+                                    if "Answer:" in line or ": Yes " in line or ": No " in line:
+                                        # Answer in same line
+                                        if ": Yes " in line:
+                                            answer = "Yes"
+                                            parts = line.split(": Yes ")
+                                            reasoning = parts[1] if len(parts) > 1 else ""
+                                        elif ": No " in line:
+                                            answer = "No"
+                                            parts = line.split(": No ")
+                                            reasoning = parts[1] if len(parts) > 1 else ""
+                                        else:
+                                            parts = line.split("Answer:")
+                                            answer = parts[1].strip() if len(parts) > 1 else ""
+                                    elif i + 1 < len(lines) and ("Answer:" in lines[i+1] or "Yes -" in lines[i+1] or "No -" in lines[i+1]):
+                                        # Answer in next line
+                                        i += 1
+                                        line = lines[i].strip()
+                                        if "Yes -" in line:
+                                            answer = "Yes"
+                                            reasoning = line.split("Yes -")[1].strip()
+                                        elif "No -" in line:
+                                            answer = "No"
+                                            reasoning = line.split("No -")[1].strip()
+                                        else:
+                                            answer = line.replace("Answer:", "").strip()
+                                            
+                                            # Look for Reasoning in next line
+                                            if i + 1 < len(lines) and "Reasoning:" in lines[i+1]:
+                                                i += 1
+                                                reasoning = lines[i].replace("Reasoning:", "").strip()
+                                    
+                                    # Display with proper formatting
+                                    st.markdown(f"**Question:** {question}")
+                                    
+                                    # Color-code the answer
+                                    if answer.lower() == 'yes':
+                                        st.success(f"**Answer:** {answer}")
+                                    elif answer.lower() == 'no':
+                                        st.error(f"**Answer:** {answer}")
+                                    else:
+                                        st.write(f"**Answer:** {answer}")
+                                    
+                                    st.markdown(f"**Reasoning:** {reasoning}")
+                                    st.divider()
+                                i += 1
+                            
+                            # If we couldn't parse the format, just display as is
+                            if i == 0:
+                                st.write(feedback)
+                    elif isinstance(feedback, list):
+                        for item in feedback:
+                            if isinstance(item, dict):
+                                question = item.get('Question', '')
+                                answer = item.get('Answer', '')
+                                reasoning = item.get('Reasoning', '')
+                                
+                                st.markdown(f"**Question:** {question}")
+                                
+                                # Color-code the answer
+                                if answer.lower() == 'yes':
+                                    st.success(f"**Answer:** {answer}")
+                                elif answer.lower() == 'no':
+                                    st.error(f"**Answer:** {answer}")
+                                else:
+                                    st.write(f"**Answer:** {answer}")
+                                
+                                st.markdown(f"**Reasoning:** {reasoning}")
+                                st.divider()
+                            else:
+                                st.write(item)
+                    else:
+                        st.write(str(feedback))
+    else:
+        # Single brief case
+        st.subheader(f"Brief: {report['brief_title']}")
         
-        # Display category scores in columns
-        st.write("Category Scores:")
-        cols = st.columns(4)  # Adjust number of columns as needed
-        for idx, (category, score) in enumerate(report['category_scores'].items()):
-            with cols[idx % 4]:
-                st.metric(category.replace('_', ' ').title(), f"{score}/10")
+        # Display overall score
+        st.metric("Overall Score", f"{report['total_score']}/{report['max_possible_score']} ({report['percentage_score']:.1f}%)")
         
-        # Display verification result
-        st.write("Fact Verification:", 
-                "✅ Passed" if report['verification_result'] else "❌ Failed")
+        # Display category scores
+        st.subheader("Category Scores")
+        for category, score in report['category_scores'].items():
+            max_score = report['category_max_scores'].get(category, 0)
+            st.metric(category.replace("_", " ").title(), f"{score}/{max_score}")
         
-        # Display detailed feedback in an expander
-        with st.expander("See Detailed Feedback"):
-            for category, feedback in report['detailed_feedback'].items():
-                st.write(f"**{category.replace('_', ' ').title()}:**")
-                st.write(feedback)
+        # Display verification status
+        st.subheader("Verification Status")
+        verification_status = "PASSED" if report['verification_result'] else "FAILED"
+        st.metric("Status", verification_status, delta=None)
         
         # Display recommendations
-        st.write("Recommendations:")
+        st.subheader("Recommendations")
         for rec in report['recommendations']:
-            st.write(f"- {rec}")
-    else:
-        st.error("Invalid report format. Could not display evaluation results.")
-        st.write("Report keys:", list(report.keys()))
-    
-    # Add download buttons for reports
-    if ("evaluations" in report) or ("total_score" in report):
-        st.subheader("Download Reports")
-        col1, col2 = st.columns(2)
+            st.write(f"• {rec}")
         
-        # Initialize evaluator to access report generation methods
-        evaluator = SocialMediaAdEvaluator()
-        
-        # Get current timestamp for unique filenames
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Generate CSV report
-        csv_report = evaluator.generate_csv_report(report)
-        col1.download_button(
-            label="Download CSV Report",
-            data=csv_report,
-            file_name=f"ad_evaluation_report_{timestamp}.csv",
-            mime="text/csv",
-            help="Download a CSV spreadsheet with evaluation scores and feedback"
-        )
-        
-        # Generate HTML report
-        html_report = evaluator.generate_html_report(report)
-        col2.download_button(
-            label="Download Detailed HTML Report",
-            data=html_report,
-            file_name=f"ad_evaluation_report_{timestamp}.html",
-            mime="text/html",
-            help="Download a formatted HTML report with complete evaluation details"
-        )
+        # Display detailed feedback
+        st.subheader("Detailed Feedback")
+        for category, feedback in report['detailed_feedback'].items():
+            with st.expander(category.replace("_", " ").title()):
+                if isinstance(feedback, str):
+                    # Try to parse feedback into question-answer-reasoning format
+                    # Look for patterns like "Question: X, Answer: Y, Reasoning: Z"
+                    items = []
+                    # Split by question format
+                    question_pattern = r'- ([^:]+): (Yes|No) - (.+?)(?=- [^:]+: |$)'
+                    matches = re.findall(question_pattern, feedback, re.DOTALL)
+                    
+                    if matches:
+                        for question, answer, reasoning in matches:
+                            # Display with proper formatting
+                            st.markdown(f"**Question:** {question.strip()}")
+                            
+                            # Color-code the answer
+                            if answer.lower() == 'yes':
+                                st.success(f"**Answer:** {answer}")
+                            else:
+                                st.error(f"**Answer:** {answer}")
+                            
+                            st.markdown(f"**Reasoning:** {reasoning.strip()}")
+                            st.divider()
+                    else:
+                        # Try another pattern: splitting by line breaks and looking for Question, Answer, Reasoning prefixes
+                        lines = feedback.split('\n')
+                        i = 0
+                        while i < len(lines):
+                            line = lines[i].strip()
+                            if line.startswith("Question:") or line.startswith("- "):
+                                question = line.replace("Question:", "").replace("- ", "").strip()
+                                
+                                # Look for Answer
+                                answer = ""
+                                reasoning = ""
+                                
+                                # Try to find answer in the same line or next lines
+                                if "Answer:" in line or ": Yes " in line or ": No " in line:
+                                    # Answer in same line
+                                    if ": Yes " in line:
+                                        answer = "Yes"
+                                        parts = line.split(": Yes ")
+                                        reasoning = parts[1] if len(parts) > 1 else ""
+                                    elif ": No " in line:
+                                        answer = "No"
+                                        parts = line.split(": No ")
+                                        reasoning = parts[1] if len(parts) > 1 else ""
+                                    else:
+                                        parts = line.split("Answer:")
+                                        answer = parts[1].strip() if len(parts) > 1 else ""
+                                elif i + 1 < len(lines) and ("Answer:" in lines[i+1] or "Yes -" in lines[i+1] or "No -" in lines[i+1]):
+                                    # Answer in next line
+                                    i += 1
+                                    line = lines[i].strip()
+                                    if "Yes -" in line:
+                                        answer = "Yes"
+                                        reasoning = line.split("Yes -")[1].strip()
+                                    elif "No -" in line:
+                                        answer = "No"
+                                        reasoning = line.split("No -")[1].strip()
+                                    else:
+                                        answer = line.replace("Answer:", "").strip()
+                                        
+                                        # Look for Reasoning in next line
+                                        if i + 1 < len(lines) and "Reasoning:" in lines[i+1]:
+                                            i += 1
+                                            reasoning = lines[i].replace("Reasoning:", "").strip()
+                                    
+                                    # Display with proper formatting
+                                    st.markdown(f"**Question:** {question}")
+                                    
+                                    # Color-code the answer
+                                    if answer.lower() == 'yes':
+                                        st.success(f"**Answer:** {answer}")
+                                    elif answer.lower() == 'no':
+                                        st.error(f"**Answer:** {answer}")
+                                    else:
+                                        st.write(f"**Answer:** {answer}")
+                                    
+                                    st.markdown(f"**Reasoning:** {reasoning}")
+                                    st.divider()
+                                i += 1
+                            
+                            # If we couldn't parse the format, just display as is
+                            if i == 0:
+                                st.write(feedback)
+                elif isinstance(feedback, list):
+                    for item in feedback:
+                        if isinstance(item, dict):
+                            question = item.get('Question', '')
+                            answer = item.get('Answer', '')
+                            reasoning = item.get('Reasoning', '')
+                            
+                            st.markdown(f"**Question:** {question}")
+                            
+                            # Color-code the answer
+                            if answer.lower() == 'yes':
+                                st.success(f"**Answer:** {answer}")
+                            elif answer.lower() == 'no':
+                                st.error(f"**Answer:** {answer}")
+                            else:
+                                st.write(f"**Answer:** {answer}")
+                            
+                            st.markdown(f"**Reasoning:** {reasoning}")
+                            st.divider()
+                        else:
+                            st.write(item)
+                else:
+                    st.write(str(feedback))
+
+    # Display radar chart of scores
+    if report["evaluations"] and len(report["evaluations"]) > 0:
+        st.subheader("Score Visualization")
+        fig = create_radar_chart(report["evaluations"][0]["category_scores"], report["evaluations"][0]["category_max_scores"])
+        st.plotly_chart(fig)
 
 def main():
     st.set_page_config(
@@ -212,114 +448,77 @@ def main():
         # Add explanation of scoring
         st.subheader("📊 Scoring System")
         st.write("""
-        Each brief is evaluated across 8 criteria, with a maximum of 10 points per criteria:
+        Each brief is evaluated across 9 criteria:
         
         - Creativity
-        - Ad Brief Alignment
-        - Debrief Analysis
-        - Hallucination Check
+        - Emotional Appeal 
         - Relevance & Clarity
-        - Emotional Appeal
         - Natural Language
-        - Winning Ads Comparison
+        - System 1 Assessment
+        - System 2 Validation
+        - Cognitive Harmony
+        - Red Flags
+        - Hallucination Check
         
-        Total maximum score: 80 points (100%)
+        For each section, the score equals the number of 'Yes' answers to evaluation questions.
+        The total score is the sum of all 'Yes' answers across all categories.
+        
+        The maximum score depends on the total number of questions evaluated across all criteria.
         
         Categories that cannot be evaluated (due to missing sections) will receive 0 points.
         """)
     
-    # Input method selection
-    input_method = st.radio(
-        "Choose input method:",
-        ['File Upload', 'Text Input'],
-        key='input_method'
-    )
+    # Use tabs to show different sections
+    tab1, tab2 = st.tabs(["Upload & Evaluate", "About"])
     
-    # Script input
-    script_file = None
-    script_text = ""
-    reference_files = []
-    reference_text = ""
-    winning_ads_files = []
-    winning_ads_text = ""
-    
-    if input_method == 'File Upload':
-        # Main layout with three columns
-        col1, col2, col3 = st.columns(3)
+    with tab1:
+        # Get API key from environment
+        api_key = os.getenv("OPENAI_API_KEY")
         
-        with col1:
-            st.subheader("1. Upload Script")
-            script_file = st.file_uploader(
-                "Upload script file",
-                type=["txt", "pdf", "docx"],
-                help="Upload the file containing brief(s), script(s), and debrief(s)",
-                key="script_file"
-            )
+        # Initialize evaluator with the API key
+        evaluator = SocialMediaAdEvaluator(api_key=api_key)
         
-        with col2:
-            st.subheader("2. References (Optional)")
-            reference_files = st.file_uploader(
-                "Upload reference files",
-                type=["txt", "pdf", "docx", "csv"],
-                help="Upload files containing reference information for fact verification",
-                accept_multiple_files=True,
-                key="reference_files"
-            )
+        # Add file upload widgets
+        st.header("Upload Files")
         
-        with col3:
-            st.subheader("3. Winning Ads (Optional)")
-            winning_ads_files = st.file_uploader(
-                "Upload winning ad examples",
-                type=["txt", "pdf", "docx"],
-                help="Upload examples of successful ads to compare against",
-                accept_multiple_files=True,
-                key="winning_ads"
-            )
-    else:
-        # Direct text entry with three columns
-        col1, col2, col3 = st.columns(3)
+        script_file = st.file_uploader("Upload Ad Script", type=["txt", "docx", "pdf"], key="script")
         
-        with col1:
-            st.subheader("1. Enter Script")
-            script_text = st.text_area(
-                "Paste script here",
-                height=300,
-                help="Include brief, script, and debrief sections",
-                key="script_text"
-            )
+        ref_expander = st.expander("Reference Materials (Optional)")
+        with ref_expander:
+            # Multiple reference document upload
+            reference_files = st.file_uploader("Upload Reference Documents", 
+                                             type=["txt", "docx", "pdf"], 
+                                             accept_multiple_files=True,
+                                             key="references")
+            
+            # Reference text input
+            reference_text = st.text_area("Or enter reference text directly", 
+                                        height=200,
+                                        placeholder="Enter product details, facts, or market research...",
+                                        key="reference_text")
         
-        with col2:
-            st.subheader("2. References (Optional)")
-            reference_text = st.text_area(
-                "Paste reference information",
-                height=300,
-                help="Paste reference information for fact verification",
-                key="reference_text"
-            )
-        
-        with col3:
-            st.subheader("3. Winning Ads (Optional)")
-            winning_ads_text = st.text_area(
-                "Paste winning ad examples",
-                height=300,
-                help="Paste examples of successful ads to compare against",
-                key="winning_ads_text"
-            )
+        winning_expander = st.expander("Winning Examples (Optional)")
+        with winning_expander:
+            # Multiple winning ad upload
+            winning_files = st.file_uploader("Upload Winning Ad Examples", 
+                                           type=["txt", "docx", "pdf"], 
+                                           accept_multiple_files=True,
+                                           key="winning")
+            
+            # Winning examples text input
+            winning_text = st.text_area("Or enter winning ad examples directly", 
+                                      height=200,
+                                      placeholder="Enter examples of successful ads in this format...",
+                                      key="winning_text")
     
     # Evaluation button
     if st.button("Evaluate Ad Script", type="primary"):
         try:
             # Input validation
-            if input_method == 'File Upload':
-                if script_file is None:
-                    st.error("Please upload a script file.")
-                    return
-                script_path = save_uploaded_file(script_file)
-            else:
-                if not script_text.strip():
-                    st.error("Please enter script text.")
-                    return
-                script_path = save_text_to_file(script_text)
+            if script_file is None:
+                st.error("Please upload a script file.")
+                return
+            script_path = save_uploaded_file(script_file)
             
             # Create progress bar
             progress_bar = st.progress(0)
@@ -328,28 +527,27 @@ def main():
             # Process reference documents
             status_text.text("Processing reference documents...")
             ref_paths = []
-            if input_method == 'File Upload' and reference_files:
+            if reference_files:
                 for ref_file in reference_files:
                     ref_paths.append(save_uploaded_file(ref_file))
-            elif input_method == 'Text Input' and reference_text:
+            elif reference_text:
                 ref_path = save_text_to_file(reference_text)
                 ref_paths.append(ref_path)
             
             # Process winning ads
             status_text.text("Processing winning ads examples...")
             winning_paths = []
-            if input_method == 'File Upload' and winning_ads_files:
-                for win_file in winning_ads_files:
+            if winning_files:
+                for win_file in winning_files:
                     winning_paths.append(save_uploaded_file(win_file))
-            elif input_method == 'Text Input' and winning_ads_text:
-                win_path = save_text_to_file(winning_ads_text)
+            elif winning_text:
+                win_path = save_text_to_file(winning_text)
                 winning_paths.append(win_path)
             
             progress_bar.progress(10)
             
             # Parse main document
             status_text.text("Parsing input documents and extracting briefs...")
-            evaluator = SocialMediaAdEvaluator()
             
             # Initial document parsing (estimate 20% of work)
             progress_bar.progress(20)
@@ -434,83 +632,20 @@ def main():
     # Display previous results if they exist
     elif st.session_state.evaluation_results is not None:
         display_evaluation_results(st.session_state.evaluation_results)
+        
+        # Add a separate "Download Results" section if desired
+        st.sidebar.markdown("---")
+        if st.sidebar.expander("Download Options", expanded=False):
+            add_download_buttons(st.session_state.evaluation_results, location_prefix="sidebar")
     
     # Add information about the evaluation criteria
     with st.sidebar:
         st.header("Evaluation Criteria")
         
-        criteria_descriptions = {
-            "Creativity (0-10)": """
-            - Does the ad stand out and capture attention effectively?
-            - Is the idea original and creatively executed?
-            - Does the script evoke emotional engagement, curiosity, or intrigue?
-            """,
-            
-            "Ad Brief Alignment (0-10)": """
-            - Does the script accurately align with the provided brief?
-            - Are all critical elements mentioned in the brief clearly reflected?
-            - Is the tone and messaging consistent with the brief's specified audience and objective?
-            """,
-            
-            "Debrief Analysis (0-10)": """
-            - Has the LLM addressed key feedback and insights from previous successful ad scripts?
-            - Is there an improvement in identified areas from past evaluations?
-            - Does the script avoid previously noted weaknesses?
-            """,
-            
-            "Hallucination Check (0-10)": """
-            - Has every claim been verified against provided documentation?
-            - Are there any instances of hallucination or inaccuracies?
-            - Is all factual information accurately represented and verifiable?
-            """,
-            
-            "Relevance & Clarity (0-10)": """
-            - Does the script clearly convey the intended message and benefits?
-            - Is the language simple, concise, and easily understandable?
-            - Does the script directly address audience pain points or needs?
-            """,
-            
-            "Emotional Appeal (0-10)": """
-            - Does the ad evoke genuine emotions or resonate with the target audience?
-            - Is it persuasive enough to drive action?
-            - Does the ad script use language that naturally appeals to human experiences?
-            """,
-            
-            "Natural Language (0-10)": """
-            - Does the language flow naturally, conversationally, and authentically?
-            - Is the ad script free from robotic or mechanical wording?
-            - Does the language feel human-like and relatable?
-            """,
-            
-            "Winning Ads Comparison (0-10)": """
-            - How well does the script match the quality, tone, and style of the winning examples?
-            - Does it incorporate similar successful elements or approaches?
-            - Does it follow patterns found in successful ads?
-            - Are there elements from winning ads that should be incorporated?
-            """,
-            
-            "Verification (Pass/Fail)": """
-            - Has every claim been verified against provided documentation?
-            - Any discrepancies or unverifiable statements are identified.
-            """
-        }
-        
-        for criteria, description in criteria_descriptions.items():
-            with st.expander(criteria):
-                st.markdown(description)
-        
-        st.header("About")
-        st.markdown("""
-        This evaluation system uses LangSmith to provide comprehensive 
-        analysis of social media ad scripts. It combines multiple evaluation methods including:
-        
-        - LLM-based content analysis
-        - Semantic similarity comparison
-        - Structured evaluation criteria
-        - Automated metrics calculation
-        
-        The evaluation is performed using the GPT-4 model for accurate assessment.
-        """)
+        for category, questions in EVALUATION_QUESTIONS.items():
+            with st.expander(CATEGORY_DISPLAY_NAMES[category]):
+                for question in questions:
+                    st.markdown(f"- {question}")
 
 if __name__ == "__main__":
     main() 

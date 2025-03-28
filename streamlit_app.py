@@ -205,30 +205,6 @@ def main():
            - Creative elements
            - Reference differentiation
         """)
-        
-        st.header("About")
-        st.markdown("""
-        This evaluation system uses LangSmith to provide comprehensive 
-        analysis of scripts. It combines multiple evaluation methods including:
-        
-        - LLM-based content analysis
-        - Semantic similarity comparison
-        - Structured evaluation criteria
-        - Automated metrics calculation
-        """)
-        
-        # Show LangSmith configuration
-        with st.expander("LangSmith Configuration"):
-            st.markdown("""
-            This app uses LangSmith for evaluation tracking and monitoring.
-            
-            Current configuration:
-            - Endpoint: {endpoint}
-            - Tracing: {tracing}
-            """.format(
-                endpoint=os.getenv("LANGSMITH_ENDPOINT", "Not configured"),
-                tracing=os.getenv("LANGSMITH_TRACING", "Not enabled")
-            ))
 
 if __name__ == "__main__":
     main() 
