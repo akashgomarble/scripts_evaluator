@@ -554,10 +554,12 @@ def main():
             
             # Extract briefs to calculate total evaluation steps
             with st.spinner("Extracting briefs..."):
-                # Use a simpler method to just count briefs without full evaluation
+                # Use the same extraction method as in the evaluator to count briefs
                 full_text = evaluator.script_evaluator.parse_document(script_path)
-                brief_splits = re.split(r'(?i)creative\s+brief\s+#\d+:|brief\s+#\d+:', full_text)
-                num_briefs = len(brief_splits) - 1 if len(brief_splits) > 1 else 1
+                
+                # Use the evaluator's brief extraction method
+                briefs = evaluator._extract_brief_sections(full_text)
+                num_briefs = len(briefs)
                 
                 # Show brief count
                 status_text.text(f"Found {num_briefs} {'briefs' if num_briefs > 1 else 'brief'} to evaluate")

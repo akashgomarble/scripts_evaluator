@@ -53,5 +53,7 @@ temp/
 
 # Generated files
 output/
+data/
 *.csv
 *.html 
+result1/

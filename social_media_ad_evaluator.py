@@ -25,14 +25,14 @@ if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 
 # Get model name from environment
-model_name = os.getenv("MODEL_NAME", "gpt-4-turbo-preview")  # Default to gpt-4-turbo-preview if not set
+model_name = os.getenv("MODEL_NAME", "gpt-4o")  # Default to gpt-4-turbo-preview if not set
 openai_client = OpenAI(api_key = api_key)
 
 # Import script evaluator
 from script_evaluator import ScriptEvaluator
 
 class SocialMediaAdEvaluator:
-    def __init__(self, api_key=None, model_name="gpt-4-turbo-preview"):
+    def __init__(self, api_key=None, model_name="gpt-4o"):
         """Initialize the evaluator with OpenAI API key and model name."""
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -87,6 +87,7 @@ FORMAT YOUR RESPONSE AS JSON ARRAY:
     def _extract_brief_sections(self, full_text: str) -> List[Dict[str, str]]:
         """
         Extract brief sections from the full text, handling multiple briefs if present.
+        Uses LLM to identify and separate briefs in a document.
         
         Args:
             full_text: The complete document text
@@ -94,20 +95,128 @@ FORMAT YOUR RESPONSE AS JSON ARRAY:
         Returns:
             List of dictionaries, each containing brief, script, debrief, and references sections
         """
+        print("Using LLM to extract briefs from document...")
+        
+        # Create prompt for LLM to identify multiple briefs
+        prompt = f"""
+        This document contains one or more social media ad briefs (possibly 4 or more briefs).
+        
+        Your task is to carefully analyze this document and separate each distinct brief. 
+        Briefs may be labeled as "Creative Brief #1", "Brief #2", etc., or may use other heading formats.
+        
+        Each brief typically contains:
+        - A brief number or identifier
+        - Product/company information
+        - Target audience details
+        - Brand voice/tone guidelines
+        - Key messages or benefits
+        - A script section (which may contain dialogue, visuals, timing information)
+        
+        For each distinct brief you identify, extract:
+        1. Brief Number (e.g. Brief #1, Brief #2, etc.)
+        2. The full content of that brief including all sections
+        
+        FORMAT YOUR RESPONSE AS JSON:
+        [
+          {{
+            "brief_number": 1,
+            "content": "Full text of Brief #1 including script..."
+          }},
+          {{
+            "brief_number": 2,
+            "content": "Full text of Brief #2 including script..."
+          }},
+          ...
+        ]
+        
+        IMPORTANT INSTRUCTIONS:
+        - Be thorough in identifying ALL briefs in the document.
+        - Do not merge multiple briefs together.
+        - Include brief numbers in your response.
+        - Ensure each "content" field contains the complete text of that brief.
+        - Look for section headings or patterns that indicate separate briefs.
+        
+        Document to analyze:
+        {full_text}
+        """
+        
+        try:
+            # Call the OpenAI API
+            response = self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant specialized in extracting structured content from documents containing ad briefs."},
+                    {"role": "user", "content": prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0
+            )
+            
+            result = json.loads(response.choices[0].message.content)
+            
+            # Process the LLM response
+            briefs = []
+            
+            # Check if we have a list of briefs directly
+            if isinstance(result, list) and len(result) > 0:
+                print(f"LLM extraction found {len(result)} briefs")
+                for brief_item in result:
+                    brief_number = brief_item.get('brief_number', 0)
+                    brief_content = brief_item.get('content', '')
+                    
+                    if brief_content:
+                        brief_sections, missing_sections = self._extract_single_brief_sections(brief_content)
+                        brief_sections['brief_number'] = brief_number
+                        if missing_sections:
+                            brief_sections['missing_sections'] = missing_sections
+                        briefs.append(brief_sections)
+                
+                if briefs:
+                    return briefs
+            
+            # Check if the result has a 'briefs' key (alternative format)
+            elif isinstance(result, dict) and 'briefs' in result and isinstance(result['briefs'], list):
+                print(f"LLM extraction found {len(result['briefs'])} briefs")
+                for brief_item in result['briefs']:
+                    brief_number = brief_item.get('brief_number', 0)
+                    brief_content = brief_item.get('content', '')
+                    
+                    if brief_content:
+                        brief_sections, missing_sections = self._extract_single_brief_sections(brief_content)
+                        brief_sections['brief_number'] = brief_number
+                        if missing_sections:
+                            brief_sections['missing_sections'] = missing_sections
+                        briefs.append(brief_sections)
+                
+                if briefs:
+                    return briefs
+            
+            print("LLM extraction didn't yield usable results, falling back to regex approach")
+            
+        except Exception as e:
+            print(f"Error during LLM brief extraction: {str(e)}")
+            print("Falling back to regex-based brief extraction")
+        
+        # Fallback: Use regex patterns to extract briefs
         briefs = []
         
-        # Try to split on Creative Brief headers
-        brief_splits = re.split(r'(?i)creative\s+brief\s+#\d+:|brief\s+#\d+:', full_text)
+        # Try to split on Creative Brief headers with various formats
+        # This improved pattern should catch more varieties of brief headers
+        brief_pattern = r'(?i)(?:creative\s+)?brief(?:\s+#?\d+)?(?:\s*:|\s*-|\n)'
+        brief_splits = re.split(brief_pattern, full_text)
         
         if len(brief_splits) > 1:
             # Found multiple briefs
-            print(f"Found {len(brief_splits)-1} briefs in the document")
+            print(f"Regex approach found {len(brief_splits)-1} briefs in the document")
+            
+            # Get all matches to preserve the brief headers
+            header_matches = re.finditer(brief_pattern, full_text)
+            headers = [m.group(0) for m in header_matches]
             
             # Process each brief, skipping the text before the first brief header
             for i, brief_text in enumerate(brief_splits[1:], 1):
-                # Add the header back
-                brief_match = re.search(r'(?i)(creative\s+brief\s+#\d+:|brief\s+#\d+:)', full_text)
-                header = brief_match.group(1) if brief_match else f"Brief #{i}:"
+                # Add the header back if available, otherwise use a generic one
+                header = headers[i-1] if i-1 < len(headers) else f"Brief #{i}:"
                 brief_with_header = f"{header} {brief_text}"
                 
                 print(f"\nProcessing Brief #{i}")
@@ -196,22 +305,22 @@ FORMAT YOUR RESPONSE AS JSON ARRAY:
                 print(f"\n--- Evaluating {self.category_display_names[criteria]} ---")
                 
                 # Choose evaluation method based on criteria
-                if criteria in ["relevance_clarity"] and brief_sections['brief']:
-                    result = self._evaluate_criteria_with_brief(
-                        script_text=brief_sections['script'],
-                        brief_text=brief_sections['brief'],
-                        criteria=criteria,
-                        instructions=self.evaluation_instructions[criteria]
-                    )
-                elif criteria in ["system2_validation"] and brief_sections['debrief']:
+                # if criteria in ["relevance_clarity"] and brief_sections['brief']:
+                #     result = self._evaluate_criteria_with_brief(
+                #         script_text=brief_sections['script'],
+                #         brief_text=brief_sections['brief'],
+                #         criteria=criteria,
+                #         instructions=self.evaluation_instructions[criteria]
+                #     )
+                if criteria in ["system2_validation"] and brief_sections['debrief']:
                     result = self._evaluate_criteria_with_debrief(
                         script_text=brief_sections['script'],
                         debrief_text=brief_sections['debrief'],
                         criteria=criteria,
                         instructions=self.evaluation_instructions[criteria]
                     )
-                elif criteria in ["emotional_appeal", "system1_assessment", "hallucination_check"] and (brief_sections['references'] or reference_texts):
-                    references_text = brief_sections['references']
+                elif criteria in ["emotional_appeal", "system1_assessment", "hallucination_check",'relevance_clarity'] and (brief_sections['references'] or reference_texts):
+                    references_text = f"References in the brief from the documents: {brief_sections['references']} \n\n Script: {brief_sections['script']} \n\n Debrief: {brief_sections['debrief']}"
                     if reference_texts:
                         references_text = references_text + "\n\n" + additional_reference_text if references_text else additional_reference_text
                     
@@ -627,7 +736,8 @@ DO NOT include any text outside of this JSON structure.
         # Track missing sections
         missing_sections = []
         
-        print("Using LLM to extract all sections from document...")
+        # Try LLM extraction first
+        print("Using LLM to extract sections from brief...")
         extracted_sections = self._extract_all_sections_with_llm(text)
         
         # Update sections with LLM results
@@ -635,6 +745,29 @@ DO NOT include any text outside of this JSON structure.
             for section_name, content in extracted_sections.items():
                 if content and len(content.strip()) > 0:
                     sections[section_name] = content
+                    
+        # If script section is missing or empty, try to find it with pattern matching
+        if not sections["script"] or len(sections["script"].strip()) == 0:
+            print("Script section missing, trying pattern matching")
+            script_lines = []
+            in_script_section = False
+            for line in text.split("\n"):
+                line = line.strip()
+                if line.lower() == "script:" or line.lower().startswith("script:"):
+                    in_script_section = True
+                    # Extract any content after "Script:"
+                    if ":" in line:
+                        script_content = line.split(":", 1)[1].strip()
+                        if script_content:
+                            script_lines.append(script_content)
+                elif in_script_section and line and not any(line.lower().startswith(s) for s in ["brief", "debrief", "references", "thumbnail hook:", "video hook:"]):
+                    script_lines.append(line)
+                elif line.lower().startswith(("brief", "debrief", "references", "thumbnail hook:", "video hook:")):
+                    in_script_section = False
+            
+            if script_lines:
+                sections["script"] = "\n".join(script_lines)
+                print(f"Found script section using pattern matching: {len(sections['script'])} characters")
         
         # Check for any missing sections
         for section, content in sections.items():
@@ -642,7 +775,8 @@ DO NOT include any text outside of this JSON structure.
                 missing_sections.append(section)
         
         # Log what we found
-        print(f"Sections extracted: {', '.join(s for s, c in sections.items() if c)}")
+        present_sections = [s for s, c in sections.items() if c and len(c.strip()) > 0]
+        print(f"Sections extracted: {', '.join(present_sections) if present_sections else 'none'}")
         if missing_sections:
             print(f"Missing sections after extraction: {', '.join(missing_sections)}")
             
